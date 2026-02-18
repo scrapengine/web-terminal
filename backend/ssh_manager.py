@@ -109,20 +109,22 @@ class SSHManager:
     
     async def create_shell(self, session_id: str, websocket):
         """Buat interactive shell untuk WebSocket"""
+        
         if session_id not in self.connections:
             await websocket.send_json({
-                "type": "error",
-                "data": "Not connected"
+                "type": "error", 
+                "data": "Session not found"
             })
             return
         
+        conn = self.connections[session_id]
+        session_info = self.sessions.get(session_id, {})
+        
         try:
-            conn = self.connections[session_id]
-            
-            # Buat shell dengan terminal type
+            # Buat shell dengan terminal type yang benar
             process = await conn.create_process(
-                term_type='xterm',
-                env={'TERM': 'xterm'}
+                term_type='xterm-256color',  # Ganti ke xterm-256color
+                env={'TERM': 'xterm-256color'}  # TERM yang lebih lengkap
             )
             
             logger.info(f"Shell created for session {session_id}")
@@ -130,14 +132,15 @@ class SSHManager:
             # Kirim welcome message
             await websocket.send_json({
                 "type": "data",
-                "data": f"\r\n\u001b[1;32mConnected to {self.sessions[session_id]['host']}\u001b[0m\r\n"
+                "data": f"\r\n\u001b[1;32mConnected to {session_info.get('host', 'unknown')}\u001b[0m\r\n"
             })
             
-            # Task untuk baca dari process
+            # Task untuk baca dari process (output server)
             async def read_task():
                 try:
                     async for data in process.stdout:
                         if data:
+                            logger.debug(f"⬅️ From server: {data[:30]}")
                             await websocket.send_json({
                                 "type": "data",
                                 "data": data
@@ -145,17 +148,25 @@ class SSHManager:
                 except Exception as e:
                     logger.error(f"Read error: {e}")
             
-            # Task untuk baca dari websocket
+            # Task untuk baca dari websocket (input user)
             async def write_task():
                 try:
                     async for message in websocket.iter_json():
                         if message['type'] == 'input':
-                            process.stdin.write(message['data'])
+                            input_data = message['data']
+                            logger.debug(f"➡️ To server: {input_data[:30]}")
+                            
+                            # Kirim ke proses SSH
+                            process.stdin.write(input_data)
+                            
                         elif message['type'] == 'resize':
-                            process.change_terminal_size(
-                                message.get('cols', 80),
-                                message.get('rows', 24)
-                            )
+                            cols = message.get('cols')
+                            rows = message.get('rows')
+                            if cols and rows:
+                                process.change_terminal_size(
+                                    max(10, int(cols)),
+                                    max(10, int(rows))
+                                )
                 except Exception as e:
                     logger.error(f"Write error: {e}")
             

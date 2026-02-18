@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Box, IconButton, Tooltip, Chip, Typography } from "@mui/material"; // Tambahkan Typography di sini
+import { Box, IconButton, Tooltip, Chip, Typography } from "@mui/material";
 import { Terminal as XTerm } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import { WebLinksAddon } from "xterm-addon-web-links";
@@ -20,7 +20,7 @@ const Terminal = ({ session, onQuickCommand }) => {
       return;
     }
 
-    // Initialize terminal dengan konfigurasi lebih baik
+    // Initialize terminal
     const term = new XTerm({
       cursorBlink: true,
       cursorStyle: "block",
@@ -30,20 +30,13 @@ const Terminal = ({ session, onQuickCommand }) => {
         background: "#1e1e1e",
         foreground: "#f0f0f0",
         cursor: "#f0f0f0",
-        selection: "rgba(255,255,255,0.3)",
-        black: "#000000",
-        red: "#cd3131",
-        green: "#0dbc79",
-        yellow: "#e5e510",
-        blue: "#2472c8",
-        magenta: "#bc3fbc",
-        cyan: "#11a8cd",
-        white: "#e5e5e5",
       },
       rows: 30,
       cols: 80,
       scrollback: 1000,
-      tabStopWidth: 4,
+      convertEol: true,
+      disableStdin: false,
+      windowsMode: true,
     });
 
     // Add addons
@@ -72,17 +65,19 @@ const Terminal = ({ session, onQuickCommand }) => {
       setConnected(true);
       setStatus("connected");
 
-      // Kirim ukuran terminal setelah connect
+      // Kirim ukuran terminal
       setTimeout(() => {
         if (fitAddon.current && ws.readyState === WebSocket.OPEN) {
           const dimensions = fitAddon.current.proposeDimensions();
-          ws.send(
-            JSON.stringify({
-              type: "resize",
-              cols: dimensions.cols,
-              rows: dimensions.rows,
-            }),
-          );
+          if (dimensions && dimensions.cols && dimensions.rows) {
+            ws.send(
+              JSON.stringify({
+                type: "resize",
+                cols: Math.floor(dimensions.cols),
+                rows: Math.floor(dimensions.rows),
+              }),
+            );
+          }
         }
       }, 500);
     };
@@ -107,23 +102,26 @@ const Terminal = ({ session, onQuickCommand }) => {
       term.writeln("\x1b[31m\r\nDisconnected from server\x1b[0m\r\n");
     };
 
-    ws.onerror = (error) => {
-      console.error("WebSocket error:", error);
-      setStatus("error");
-      term.writeln("\x1b[31m\r\nConnection error\x1b[0m\r\n");
-    };
-
-    // Handle terminal input - kirim ke WebSocket
+    // ✅ BENAR: Handler untuk input real-time
     term.onData((data) => {
+      console.log("Input detected:", JSON.stringify(data)); // Untuk debug
+
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        // Kirim setiap karakter langsung ke server
         wsRef.current.send(
           JSON.stringify({
             type: "input",
             data: data,
           }),
         );
+
+        // UNTUK TESTING: Tampilkan lokal echo (hanya untuk debug)
+        // term.write(data); // Uncomment ini untuk melihat karakter langsung
       }
     });
+
+    // ✅ BENAR: Untuk paste, kita bisa handle via onData juga
+    // atau menggunakan custom handler
 
     // Handle resize
     const handleResize = () => {
@@ -133,13 +131,15 @@ const Terminal = ({ session, onQuickCommand }) => {
         wsRef.current.readyState === WebSocket.OPEN
       ) {
         const dimensions = fitAddon.current.proposeDimensions();
-        wsRef.current.send(
-          JSON.stringify({
-            type: "resize",
-            cols: dimensions.cols,
-            rows: dimensions.rows,
-          }),
-        );
+        if (dimensions && dimensions.cols && dimensions.rows) {
+          wsRef.current.send(
+            JSON.stringify({
+              type: "resize",
+              cols: Math.floor(dimensions.cols),
+              rows: Math.floor(dimensions.rows),
+            }),
+          );
+        }
       }
     };
     window.addEventListener("resize", handleResize);
@@ -157,23 +157,6 @@ const Terminal = ({ session, onQuickCommand }) => {
       }
     };
   }, [session.connected, session.backendId]);
-
-  // Handle quick commands from parent
-  useEffect(() => {
-    if (onQuickCommand) {
-      window.sendCommandToTerminal = (command) => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(
-            JSON.stringify({
-              type: "command",
-              data: command,
-            }),
-          );
-          terminalInstance.current.write(command + "\r\n");
-        }
-      };
-    }
-  }, [onQuickCommand]);
 
   const handleReconnect = () => {
     if (window.handleReconnect) {
@@ -251,7 +234,11 @@ const Terminal = ({ session, onQuickCommand }) => {
           bgcolor: "#1e1e1e",
           p: 1,
           overflow: "hidden",
+          "& .xterm": {
+            height: "100%",
+          },
         }}
+        onClick={() => terminalInstance.current?.focus()}
       />
     </Box>
   );
