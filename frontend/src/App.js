@@ -59,14 +59,38 @@ function App() {
   };
 
   const handleNewSession = (connection) => {
+    // Validasi: cek apakah session dengan host yang sama sudah ada
+    const existingSession = sessions.find(
+      s => s.host === connection.host && 
+          s.port === connection.port && 
+          s.username === connection.username
+    );
+    
+    if (existingSession) {
+      alert(`Session ke ${connection.host} sudah ada! Beralih ke tab tersebut.`);
+      setActiveSession(existingSession.id);
+      setShowLogin(false);
+      return;
+    }
+
+    // Buat session name otomatis jika tidak diisi
+    const sessionName = connection.sessionName || 
+      `${connection.username}@${connection.host}:${connection.port}`;
+
     const newSession = {
       id: Date.now().toString(),
-      ...connection,
+      name: sessionName,  // Gunakan nama yang sudah diproses
+      host: connection.host,
+      port: connection.port,
+      username: connection.username,
+      password: connection.password,  // Dalam production, jangan simpan password di state!
       connected: false,
       status: 'disconnected'
     };
+    
     setSessions([...sessions, newSession]);
     setActiveSession(newSession.id);
+    setShowLogin(false);
   };
 
   const handleConnect = async (sessionId) => {

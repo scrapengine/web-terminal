@@ -1,5 +1,5 @@
 import React from 'react';
-import { Box, Tab, Tabs, IconButton, Badge, Tooltip } from '@mui/material';
+import { Box, Tab, Tabs, IconButton, Tooltip } from '@mui/material';  // Tambahkan Tooltip
 import CloseIcon from '@mui/icons-material/Close';
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
