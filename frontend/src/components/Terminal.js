@@ -45,7 +45,13 @@ const Terminal = ({ session, onQuickCommand }) => {
     term.loadAddon(new WebLinksAddon());
 
     // Open terminal
-    term.open(terminalRef.current);
+    term.open(terminalRef.current, true);
+    // Setelah term.open
+    setTimeout(() => {
+      term.focus();
+      term.scrollToBottom();
+      term.refresh(0, term.rows - 1);
+    }, 200);
     fitAddon.current.fit();
 
     // Focus terminal
@@ -82,18 +88,30 @@ const Terminal = ({ session, onQuickCommand }) => {
       }, 500);
     };
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === "data") {
-          term.write(data.data);
-        } else if (data.type === "error") {
-          term.writeln("\x1b[31m" + data.data + "\x1b[0m\r\n");
-        }
-      } catch (e) {
-        console.error("Error parsing message:", e);
-      }
-    };
+    // ws.onmessage = (event) => {
+    //   try {
+    //     const data = JSON.parse(event.data);
+    //     console.log("📥 FROM SERVER:", data);
+
+    //     if (data.type === "data") {
+    //       console.log("📝 ECHO:", JSON.stringify(data.data));
+
+    //       // PASTIKAN INI JALAN!
+    //       if (terminalInstance.current) {
+    //         terminalInstance.current.write(data.data);
+    //         terminalInstance.current.refresh(
+    //           0,
+    //           terminalInstance.current.rows - 1,
+    //         ); // Paksa refresh
+    //         console.log("✅ Data written to terminal");
+    //       } else {
+    //         console.error("❌ terminalInstance.current is NULL!");
+    //       }
+    //     }
+    //   } catch (e) {
+    //     console.error("Error parsing message:", e);
+    //   }
+    // };
 
     ws.onclose = (event) => {
       console.log("WebSocket closed:", event.code, event.reason);
@@ -104,21 +122,67 @@ const Terminal = ({ session, onQuickCommand }) => {
 
     // ✅ BENAR: Handler untuk input real-time
     term.onData((data) => {
-      console.log("Input detected:", JSON.stringify(data)); // Untuk debug
+      const charCode = data.charCodeAt(0);
 
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        // Kirim setiap karakter langsung ke server
+      // Handle backspace
+      if (charCode === 8 || charCode === 127) {
+        // Kirim ke server
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(
+            JSON.stringify({
+              type: "input",
+              data: "\x7f",
+            }),
+          );
+        }
+
+        // Hapus satu karakter dari layar (lokal echo)
+        if (terminalInstance.current) {
+          terminalInstance.current.write("\b \b");
+        }
+        return;
+      }
+
+      // Untuk karakter biasa: LOKAL ECHO dulu!
+      if (terminalInstance.current) {
+        terminalInstance.current.write(data); // Tampilkan langsung
+      }
+
+      // Kirim ke server
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
           JSON.stringify({
             type: "input",
             data: data,
           }),
         );
-
-        // UNTUK TESTING: Tampilkan lokal echo (hanya untuk debug)
-        // term.write(data); // Uncomment ini untuk melihat karakter langsung
       }
     });
+
+    // Tetap terima echo dari server untuk update
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.type === "data") {
+          if (terminalInstance.current) {
+            // Tulis data
+            terminalInstance.current.write(data.data);
+
+            // CEK: Ini adalah prompt (mengandung $ atau #)
+            if (data.data.includes("$") || data.data.includes("#")) {
+              // Prompt terdeteksi, paksa baris baru dengan menulis carriage return
+              setTimeout(() => {
+                // Ini akan memastikan kursor di baris yang benar
+                terminalInstance.current.write("");
+              }, 5);
+            }
+          }
+        }
+      } catch (e) {
+        console.error("Error:", e);
+      }
+    };
 
     // ✅ BENAR: Untuk paste, kita bisa handle via onData juga
     // atau menggunakan custom handler
@@ -237,6 +301,8 @@ const Terminal = ({ session, onQuickCommand }) => {
           "& .xterm": {
             height: "100%",
           },
+          minHeight: "200px", // Tambahkan ini
+          border: "1px solid red", // Tambahkan ini untuk debug
         }}
         onClick={() => terminalInstance.current?.focus()}
       />

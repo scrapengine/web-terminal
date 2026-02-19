@@ -121,10 +121,10 @@ class SSHManager:
         session_info = self.sessions.get(session_id, {})
         
         try:
-            # Buat shell dengan terminal type yang benar
+            # Buat shell
             process = await conn.create_process(
-                term_type='xterm-256color',  # Ganti ke xterm-256color
-                env={'TERM': 'xterm-256color'}  # TERM yang lebih lengkap
+                term_type='xterm-256color',
+                env={'TERM': 'xterm-256color'}
             )
             
             logger.info(f"Shell created for session {session_id}")
@@ -135,12 +135,35 @@ class SSHManager:
                 "data": f"\r\n\u001b[1;32mConnected to {session_info.get('host', 'unknown')}\u001b[0m\r\n"
             })
             
-            # Task untuk baca dari process (output server)
+            # 🔥 PENTING: Tangkap prompt awal
+            initial_data = ""
+            try:
+                # Baca data awal selama 1 detik
+                for _ in range(10):  # Coba 10 kali
+                    try:
+                        data = await asyncio.wait_for(process.stdout.__anext__(), timeout=0.1)
+                        initial_data += data
+                        logger.info(f"📥 Initial data: {repr(data)}")
+                    except asyncio.TimeoutError:
+                        break  # Tidak ada data lagi
+                    except StopAsyncIteration:
+                        break
+            except Exception as e:
+                logger.error(f"Error reading initial data: {e}")
+            
+            # Kirim semua data awal termasuk prompt
+            if initial_data:
+                await websocket.send_json({
+                    "type": "data",
+                    "data": initial_data
+                })
+            
+            # Task untuk baca dari process selanjutnya
             async def read_task():
                 try:
                     async for data in process.stdout:
                         if data:
-                            logger.debug(f"⬅️ From server: {data[:30]}")
+                            logger.info(f"📤 Sending from server: {repr(data)}")
                             await websocket.send_json({
                                 "type": "data",
                                 "data": data
@@ -148,15 +171,13 @@ class SSHManager:
                 except Exception as e:
                     logger.error(f"Read error: {e}")
             
-            # Task untuk baca dari websocket (input user)
+            # Task untuk baca dari websocket
             async def write_task():
                 try:
                     async for message in websocket.iter_json():
                         if message['type'] == 'input':
                             input_data = message['data']
                             logger.debug(f"➡️ To server: {input_data[:30]}")
-                            
-                            # Kirim ke proses SSH
                             process.stdin.write(input_data)
                             
                         elif message['type'] == 'resize':
