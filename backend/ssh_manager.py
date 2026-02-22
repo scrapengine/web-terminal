@@ -13,6 +13,17 @@ import signal
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ==================== PYWINPTY IMPORT ====================
+try:
+    from winpty import PtyProcess
+    WINPTY_AVAILABLE = True
+except ImportError:
+    WINPTY_AVAILABLE = False
+    logger.warning("pywinpty not installed. Windows local terminal will not work.")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 class SSHManager:
     def __init__(self):
         self.connections: Dict[str, asyncssh.SSHClientConnection] = {}
@@ -107,7 +118,7 @@ class SSHManager:
             traceback.print_exc()
             return False
     
-    # ==================== LOCAL TERMINAL (IMPROVED) ====================
+    # ==================== LOCAL TERMINAL DENGAN PYWINPTY ====================
     async def create_local_shell(self, session_id: str) -> bool:
         """Buat shell lokal dengan deteksi OS"""
         try:
@@ -117,7 +128,10 @@ class SSHManager:
             logger.info(f"Detected OS: {system}")
             
             if system == "Windows":
-                return await self._create_windows_local_shell(session_id)
+                if not WINPTY_AVAILABLE:
+                    logger.error("pywinpty not installed. Please run: pip install pywinpty")
+                    return False
+                return await self._create_windows_local_shell_pywinpty(session_id)
             elif system == "Linux":
                 return await self._create_linux_local_shell(session_id)
             elif system == "Darwin":
@@ -130,8 +144,42 @@ class SSHManager:
             logger.error(f"❌ Failed to create local shell: {e}", exc_info=True)
             return False
     
-    async def _create_windows_local_shell(self, session_id: str) -> bool:
-        """Buat local shell di Windows dengan PowerShell"""
+    # ==================== WINDOWS DENGAN PYWINPTY ====================
+    async def _create_windows_local_shell_pywinpty(self, session_id: str) -> bool:
+        """Buat local shell di Windows dengan pywinpty (ConPTY)"""
+        try:
+            # Spawn PowerShell dengan opsi minimal
+            proc = PtyProcess.spawn('powershell.exe')
+            
+            logger.info(f"✅ Pywinpty PowerShell process started")
+            
+            # Jangan kirim perintah langsung, biarkan PowerShell menampilkan prompt default
+            
+            self.local_sessions[session_id] = {
+                'process': proc,
+                'type': 'winpty'
+            }
+            
+            self.sessions[session_id] = {
+                'host': 'localhost',
+                'port': 0,
+                'username': os.environ.get('USERNAME', 'user'),
+                'connected': True,
+                'type': 'local',
+                'platform': 'Windows',
+                'shell': 'PowerShell (ConPTY)'
+            }
+            
+            logger.info(f"✅ Windows local shell (pywinpty) created for session {session_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create Windows pywinpty shell: {e}", exc_info=True)
+        return False
+    
+    # ==================== WINDOWS LEGACY (fallback) ====================
+    async def _create_windows_local_shell_legacy(self, session_id: str) -> bool:
+        """Buat local shell di Windows dengan threading (legacy fallback)"""
         try:
             # Buat queue untuk komunikasi
             output_queue = queue.Queue()
@@ -141,14 +189,13 @@ class SSHManager:
             
             def shell_thread():
                 try:
-                    # PowerShell dengan prompt yang lebih baik
                     process = subprocess.Popen(
                         [
                             "powershell.exe",
                             "-NoLogo",
                             "-NoExit",
                             "-Command",
-                            "function prompt { 'PS ' + (Get-Location).Path + '> ' }; Set-Location ~; $Host.UI.RawUI.ForegroundColor = 'Green'"
+                            "function prompt { 'PS ' + (Get-Location).Path + '> ' }; Set-Location ~"
                         ],
                         stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE,
@@ -159,17 +206,16 @@ class SSHManager:
                         creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
                     )
                     
-                    logger.info(f"PowerShell process started with PID: {process.pid}")
+                    logger.info(f"Legacy PowerShell process started with PID: {process.pid}")
                     
-                    # Simpan process di local_sessions
                     self.local_sessions[session_id] = {
                         'process': process,
                         'input_queue': input_queue,
                         'output_queue': output_queue,
-                        'running': running
+                        'running': running,
+                        'type': 'winpty_fallback'
                     }
                     
-                    # Thread untuk baca output
                     def read_output():
                         while running.is_set():
                             try:
@@ -184,7 +230,6 @@ class SSHManager:
                     reader = threading.Thread(target=read_output, daemon=True)
                     reader.start()
                     
-                    # Thread untuk tulis input
                     def write_input():
                         while running.is_set():
                             try:
@@ -201,22 +246,18 @@ class SSHManager:
                     writer = threading.Thread(target=write_input, daemon=True)
                     writer.start()
                     
-                    # Tunggu process selesai
                     process.wait()
                     
                 except Exception as e:
-                    logger.error(f"Shell thread error: {e}")
+                    logger.error(f"Legacy shell thread error: {e}")
                 finally:
                     running.clear()
-                    logger.info(f"Shell thread ended for session {session_id}")
                 
                 return True
             
-            # Jalankan thread
             thread = threading.Thread(target=shell_thread, daemon=True)
             thread.start()
             
-            # Tunggu sebentar untuk memastikan process berjalan
             await asyncio.sleep(1)
             
             self.sessions[session_id] = {
@@ -226,20 +267,20 @@ class SSHManager:
                 'connected': True,
                 'type': 'local',
                 'platform': 'Windows',
-                'shell': 'PowerShell'
+                'shell': 'PowerShell (Legacy)'
             }
             
-            logger.info(f"✅ Windows local shell created for session {session_id}")
+            logger.info(f"✅ Windows legacy shell created for session {session_id}")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to create Windows local shell: {e}", exc_info=True)
+            logger.error(f"❌ Failed to create Windows legacy shell: {e}", exc_info=True)
             return False
     
+    # ==================== LINUX LOCAL SHELL ====================
     async def _create_linux_local_shell(self, session_id: str) -> bool:
         """Buat local shell di Linux dengan bash"""
         try:
-            # Cek shell yang tersedia
             shells = ['/bin/bash', '/bin/sh']
             shell_cmd = None
             
@@ -266,7 +307,7 @@ class SSHManager:
                 }
             )
             
-            logger.info(f"Shell process started with PID: {process.pid}")
+            logger.info(f"Linux shell process started with PID: {process.pid}")
             
             self.local_sessions[session_id] = {
                 'process': process,
@@ -290,10 +331,10 @@ class SSHManager:
             logger.error(f"❌ Failed to create Linux local shell: {e}", exc_info=True)
             return False
     
+    # ==================== MACOS LOCAL SHELL ====================
     async def _create_mac_local_shell(self, session_id: str) -> bool:
         """Buat local shell di macOS dengan zsh"""
         try:
-            # Cek shell yang tersedia (zsh default di macOS)
             shells = ['/bin/zsh', '/bin/bash']
             shell_cmd = None
             
@@ -320,7 +361,7 @@ class SSHManager:
                 }
             )
             
-            logger.info(f"Shell process started with PID: {process.pid}")
+            logger.info(f"macOS shell process started with PID: {process.pid}")
             
             self.local_sessions[session_id] = {
                 'process': process,
@@ -344,8 +385,9 @@ class SSHManager:
             logger.error(f"❌ Failed to create macOS local shell: {e}", exc_info=True)
             return False
     
+    # ==================== HANDLE LOCAL SHELL ====================
     async def handle_local_shell(self, session_id: str, websocket):
-        """Handle local shell session - mirip dengan SSH"""
+        """Handle local shell session"""
         if session_id not in self.local_sessions:
             await websocket.send_json({
                 "type": "error",
@@ -359,20 +401,76 @@ class SSHManager:
         shell_name = session_info.get('shell', 'Shell')
         
         # Kirim welcome message
-        await websocket.send_json({
-            "type": "data",
-            "data": f"\r\n\u001b[1;32m🔌 Local Terminal ({platform_name} - {shell_name})\u001b[0m\r\n"
-        })
-        await websocket.send_json({
-            "type": "data",
-            "data": f"\u001b[1;34m📡 Connected to {platform.node()}\u001b[0m\r\n\r\n"
-        })
+        # await websocket.send_json({
+        #     "type": "data",
+        #     "data": f"\r\n\u001b[1;32m🔌 Local Terminal ({platform_name} - {shell_name})\u001b[0m\r\n"
+        # })
+        # await websocket.send_json({
+        #     "type": "data",
+        #     "data": f"\u001b[1;34m📡 Connected to {platform.node()}\u001b[0m\r\n\r\n"
+        # })
         
-        if session.get('type') == 'asyncio':
-            # Untuk Linux/macOS (asyncio subprocess)
+        # ==================== PYWINPTY HANDLER ====================
+        if session.get('type') == 'winpty':
+            proc = session['process']
+            
+            # Baca output awal
+            try:
+                await asyncio.sleep(0.5)
+                initial_data = proc.read()
+                if initial_data:
+                    # Bersihkan output agar tidak menggabungkan baris
+                    lines = initial_data.split('\n')
+                    for i, line in enumerate(lines):
+                        if line.strip() or line == '':
+                            # Tambahkan newline kecuali baris terakhir yang kosong
+                            if i < len(lines) - 1 or (i == len(lines) - 1 and line.strip()):
+                                await websocket.send_json({
+                                    "type": "data",
+                                    "data": line + '\r\n'
+                                })
+            except:
+                pass
+            
+            async def read_task():
+                try:
+                    while True:
+                        data = await asyncio.get_event_loop().run_in_executor(
+                            None, proc.read
+                        )
+                        if data:
+                            # Pastikan setiap baris diakhiri dengan newline yang benar
+                            await websocket.send_json({
+                                "type": "data",
+                                "data": data
+                            })
+                        else:
+                            await asyncio.sleep(0.05)
+                except Exception as e:
+                    logger.error(f"Read task error: {e}")
+            
+            async def write_task():
+                try:
+                    async for message in websocket.iter_json():
+                        if message['type'] == 'input':
+                            input_data = message['data']
+                            
+                            # Kirim ke process
+                            proc.write(input_data)
+                            
+                            # Untuk debugging
+                            logger.debug(f"Sent to PowerShell: {repr(input_data)}")
+                            
+                except Exception as e:
+                    logger.error(f"Write task error: {e}")
+            
+            await asyncio.gather(read_task(), write_task())
+        
+        # ==================== ASYNCIO HANDLER (Linux/macOS) ====================
+        elif session.get('type') == 'asyncio':
             process = session['process']
             
-            # Baca output awal (prompt)
+            # Baca output awal
             try:
                 initial_data = await asyncio.wait_for(process.stdout.read(1024), timeout=0.5)
                 if initial_data:
@@ -401,36 +499,15 @@ class SSHManager:
                     async for message in websocket.iter_json():
                         if message['type'] == 'input':
                             input_data = message['data']
-                            
-                            # 🔥 KIRIM KE SHELL (WAJIB!)
-                            input_queue.put(input_data)
-                            
-                            # Echo lokal hanya untuk tampilan
-                            if input_data == '\r' or input_data == '\n':
-                                # Enter
-                                await websocket.send_json({
-                                    "type": "data",
-                                    "data": '\r\n'
-                                })
-                            elif input_data == '\b' or input_data == '\x7f':
-                                # Backspace - tampilan saja
-                                await websocket.send_json({
-                                    "type": "data",
-                                    "data": '\b \b'
-                                })
-                            elif input_data.isprintable() or input_data in ['\t', '\x1b']:
-                                # Karakter biasa
-                                await websocket.send_json({
-                                    "type": "data",
-                                    "data": input_data
-                                })
+                            process.stdin.write(input_data.encode())
+                            await process.stdin.drain()
                 except Exception as e:
-                    logger.error(f"Write task error: {e}")
+                    logger.error(f"Write error: {e}")
             
             await asyncio.gather(read_task(), write_task())
-            
-        else:
-            # Untuk Windows (threading + queue)
+        
+        # ==================== LEGACY HANDLER (fallback) ====================
+        elif session.get('type') == 'winpty_fallback':
             output_queue = session['output_queue']
             input_queue = session['input_queue']
             running = session['running']
@@ -442,7 +519,6 @@ class SSHManager:
                             None, output_queue.get, True, 0.1
                         )
                         if line:
-                            # Bersihkan output untuk rendering yang lebih baik
                             cleaned_line = line.replace('\r\n', '\n').replace('\r', '\n')
                             await websocket.send_json({
                                 "type": "data",
@@ -458,30 +534,7 @@ class SSHManager:
                 try:
                     async for message in websocket.iter_json():
                         if message['type'] == 'input':
-                            input_data = message['data']
-                            
-                            # 🔥 KIRIM KE SHELL (WAJIB!)
-                            input_queue.put(input_data)
-                            
-                            # Echo lokal hanya untuk tampilan
-                            if input_data == '\r' or input_data == '\n':
-                                # Enter
-                                await websocket.send_json({
-                                    "type": "data",
-                                    "data": '\r\n'
-                                })
-                            elif input_data == '\b' or input_data == '\x7f':
-                                # Backspace - tampilan saja
-                                await websocket.send_json({
-                                    "type": "data",
-                                    "data": '\b \b'
-                                })
-                            elif input_data.isprintable() or input_data in ['\t', '\x1b']:
-                                # Karakter biasa
-                                await websocket.send_json({
-                                    "type": "data",
-                                    "data": input_data
-                                })
+                            input_queue.put(message['data'])
                 except Exception as e:
                     logger.error(f"Write task error: {e}")
             
@@ -490,21 +543,27 @@ class SSHManager:
         
         # Cleanup
         if session_id in self.local_sessions:
-            if session.get('type') == 'asyncio':
-                process = session['process']
-                if process.returncode is None:
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=2.0)
-                    except asyncio.TimeoutError:
-                        process.kill()
-            else:
-                process = session.get('process')
-                if process:
-                    process.terminate()
-            del self.local_sessions[session_id]
-    # ============================================================
+            try:
+                if session.get('type') == 'winpty':
+                    session['process'].terminate()
+                elif session.get('type') == 'asyncio':
+                    process = session['process']
+                    if process.returncode is None:
+                        process.terminate()
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=2.0)
+                        except asyncio.TimeoutError:
+                            process.kill()
+                elif session.get('type') == 'winpty_fallback':
+                    process = session.get('process')
+                    if process:
+                        process.terminate()
+            except:
+                pass
+            finally:
+                del self.local_sessions[session_id]
     
+    # ==================== SSH METHODS (TIDAK DIUBAH) ====================
     async def execute_command(self, session_id: str, command: str) -> str:
         if session_id not in self.connections:
             return "Not connected to any server"
@@ -536,15 +595,10 @@ class SSHManager:
 
             logger.info(f"SSH Shell created for session {session_id}")
 
-            # Hanya satu welcome message
-            # await websocket.send_json({
-            #     "type": "data",
-            #     "data": f"\r\n\u001b[1;32mConnected to {session_info.get('host', 'unknown')}\u001b[0m\r\n"
-            # })
-
             async def read_task():
                 async for data in process.stdout:
                     if data:
+                        logger.info(f"📥 RAW from server: {repr(data)}")
                         await websocket.send_json({
                             "type": "data",
                             "data": data
@@ -582,11 +636,13 @@ class SSHManager:
         if session_id in self.local_sessions:
             try:
                 session = self.local_sessions[session_id]
-                if session.get('type') == 'asyncio':
+                if session.get('type') == 'winpty':
+                    session['process'].terminate()
+                elif session.get('type') == 'asyncio':
                     process = session['process']
                     if process.returncode is None:
                         process.terminate()
-                else:
+                elif session.get('type') == 'winpty_fallback':
                     process = session.get('process')
                     if process:
                         process.terminate()

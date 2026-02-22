@@ -1,11 +1,22 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Box, IconButton, Tooltip, Chip, Typography } from "@mui/material";
+import {
+  Box,
+  IconButton,
+  Tooltip,
+  Chip,
+  Typography,
+  Fab,
+  Snackbar,
+  Alert,
+} from "@mui/material";
 import { Terminal as XTerm } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import { WebLinksAddon } from "xterm-addon-web-links";
 import "xterm/css/xterm.css";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import LinkOffIcon from "@mui/icons-material/LinkOff";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import ContentPasteIcon from "@mui/icons-material/ContentPaste";
 
 const Terminal = ({ session }) => {
   const terminalRef = useRef(null);
@@ -14,9 +25,26 @@ const Terminal = ({ session }) => {
   const wsRef = useRef(null);
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState("disconnected");
+  const [hasSelection, setHasSelection] = useState(false);
+  const [snackbarOpen, setSnackbarOpen] = useState(false);
+  const [snackbarMessage, setSnackbarMessage] = useState("");
+
+  // Deteksi apakah perangkat mobile
+  const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
   useEffect(() => {
     if (!session.connected || !session.backendId) return;
+
+    // 🔥 CEK APAKAH SUDAH ADA WEBSOCKET YANG AKTIF
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      console.log("WebSocket already connected, skipping creation");
+      return;
+    }
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.CONNECTING) {
+      console.log("WebSocket is connecting, waiting...");
+      return;
+    }
 
     // =========================
     // INIT TERMINAL
@@ -68,23 +96,14 @@ const Terminal = ({ session }) => {
       if (event.ctrlKey && event.key === "c") {
         const selection = term.getSelection();
         if (selection) {
-          navigator.clipboard.writeText(selection);
+          handleCopyToClipboard(selection);
           return false;
         }
       }
 
       // Ctrl + V → Paste
       if (event.ctrlKey && event.key === "v") {
-        navigator.clipboard.readText().then((text) => {
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(
-              JSON.stringify({
-                type: "input",
-                data: text,
-              }),
-            );
-          }
-        });
+        handlePasteFromClipboard();
         return false;
       }
 
@@ -92,7 +111,7 @@ const Terminal = ({ session }) => {
     });
 
     // =========================
-    // WEBSOCKET
+    // WEBSOCKET - HANYA SATU KALI
     // =========================
     setStatus("connecting");
 
@@ -101,7 +120,13 @@ const Terminal = ({ session }) => {
     );
     wsRef.current = ws;
 
+    // 🔥 FLAG UNTUK MENCEGAH MULTIPLE EVENT
+    let connectionEstablished = false;
+
     ws.onopen = () => {
+      if (connectionEstablished) return;
+      connectionEstablished = true;
+
       setConnected(true);
       setStatus("connected");
 
@@ -122,12 +147,16 @@ const Terminal = ({ session }) => {
     };
 
     ws.onclose = () => {
+      if (!connectionEstablished) return;
+      connectionEstablished = false;
+
       setConnected(false);
       setStatus("disconnected");
       term.writeln("\r\n\x1b[31mDisconnected from server\x1b[0m\r\n");
     };
 
     ws.onmessage = (event) => {
+      if (!connectionEstablished) return;
       try {
         const data = JSON.parse(event.data);
         if (data.type === "data" && terminalInstance.current) {
@@ -139,6 +168,7 @@ const Terminal = ({ session }) => {
     };
 
     ws.onerror = (error) => {
+      if (!connectionEstablished) return;
       console.error("WebSocket error:", error);
       setStatus("error");
       terminalInstance.current?.writeln(
@@ -161,13 +191,18 @@ const Terminal = ({ session }) => {
     });
 
     // =========================
+    // TAMBAHAN UNTUK TOUCH SELECTION (HP)
+    // =========================
+    term.onSelectionChange(() => {
+      const selected = term.getSelection();
+      setHasSelection(selected.length > 0);
+    });
+
+    // =========================
     // 🔥 EXPOSE FUNCTION UNTUK QUICK COMMANDS
     // =========================
     window.sendCommandToTerminal = (command) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
-        // console.log("Sending quick command:", command);
-
-        // Kirim perintah ke server
         wsRef.current.send(
           JSON.stringify({
             type: "input",
@@ -175,7 +210,6 @@ const Terminal = ({ session }) => {
           }),
         );
 
-        // Jika command tidak diakhiri newline, tambahkan enter
         if (!command.endsWith("\n") && !command.endsWith("\r")) {
           setTimeout(() => {
             if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -220,17 +254,90 @@ const Terminal = ({ session }) => {
     // =========================
     return () => {
       window.removeEventListener("resize", handleResize);
-
-      // Bersihkan function quick command
       window.sendCommandToTerminal = null;
 
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
+      if (wsRef.current) {
         wsRef.current.close();
+        wsRef.current = null;
       }
 
       term.dispose();
     };
   }, [session.connected, session.backendId]);
+
+  // =========================
+  // FUNGSI CLIPBOARD DENGAN FALLBACK
+  // =========================
+  const handleCopyToClipboard = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      showSnackbar("✅ Teks disalin ke clipboard");
+    } catch (err) {
+      try {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+        showSnackbar("✅ Teks disalin (fallback)");
+      } catch (fallbackErr) {
+        console.error("Copy failed:", fallbackErr);
+        showSnackbar("❌ Gagal menyalin teks", "error");
+      }
+    }
+  };
+
+  const handlePasteFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: "input",
+            data: text,
+          }),
+        );
+        showSnackbar("✅ Teks ditempel");
+      }
+    } catch (err) {
+      if (isMobile) {
+        const pastedText = prompt("Tempel teks Anda di sini:");
+        if (pastedText && wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(
+            JSON.stringify({
+              type: "input",
+              data: pastedText,
+            }),
+          );
+          showSnackbar("✅ Teks ditempel");
+        }
+      } else {
+        showSnackbar("❌ Tidak bisa mengakses clipboard", "error");
+      }
+    }
+  };
+
+  const showSnackbar = (message, severity = "success") => {
+    setSnackbarMessage(message);
+    setSnackbarOpen(true);
+    setTimeout(() => setSnackbarOpen(false), 2000);
+  };
+
+  const handleCopySelection = () => {
+    const selection = terminalInstance.current?.getSelection();
+    if (selection) {
+      handleCopyToClipboard(selection);
+    } else {
+      showSnackbar("❌ Tidak ada teks yang dipilih", "warning");
+    }
+  };
+
+  const handlePaste = () => {
+    handlePasteFromClipboard();
+  };
 
   const handleReconnect = () => {
     if (window.handleReconnect) {
@@ -245,7 +352,14 @@ const Terminal = ({ session }) => {
   };
 
   return (
-    <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
+    <Box
+      sx={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        position: "relative",
+      }}
+    >
       <Box
         sx={{
           display: "flex",
@@ -317,6 +431,53 @@ const Terminal = ({ session }) => {
         }}
         onClick={() => terminalInstance.current?.focus()}
       />
+
+      {/* FLOATING ACTION BUTTONS UNTUK COPY/PASTE */}
+      {hasSelection && (
+        <Fab
+          color="primary"
+          size="small"
+          sx={{
+            position: "absolute",
+            bottom: 16,
+            right: 16,
+            zIndex: 1000,
+          }}
+          onClick={handleCopySelection}
+          title="Copy selected text"
+        >
+          <ContentCopyIcon />
+        </Fab>
+      )}
+
+      <Fab
+        color="secondary"
+        size="small"
+        sx={{
+          position: "absolute",
+          bottom: hasSelection ? 80 : 16,
+          right: 16,
+          zIndex: 1000,
+        }}
+        onClick={handlePaste}
+        title="Paste"
+      >
+        <ContentPasteIcon />
+      </Fab>
+
+      {/* Snackbar untuk notifikasi */}
+      <Snackbar
+        open={snackbarOpen}
+        autoHideDuration={2000}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      >
+        <Alert
+          severity={snackbarMessage.includes("✅") ? "success" : "error"}
+          sx={{ width: "100%" }}
+        >
+          {snackbarMessage}
+        </Alert>
+      </Snackbar>
     </Box>
   );
 };

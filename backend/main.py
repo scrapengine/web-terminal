@@ -451,78 +451,95 @@ async def get_session(session_id: str):
 
 @app.websocket("/ws/terminal/{session_id}")
 async def terminal_websocket(websocket: WebSocket, session_id: str):
+    # 🔥 CEK APAKAH SUDAH ADA KONEKSI AKTIF UNTUK SESSION INI
+    if hasattr(terminal_websocket, "active_connections") and session_id in terminal_websocket.active_connections:
+        logger.warning(f"Session {session_id} already has active connection, rejecting new one")
+        await websocket.close(code=1008, reason="Session already connected")
+        return
+    
+    # Inisialisasi set active connections jika belum ada
+    if not hasattr(terminal_websocket, "active_connections"):
+        terminal_websocket.active_connections = set()
+    
+    terminal_websocket.active_connections.add(session_id)
+    
     await websocket.accept()
     logger.info(f"WebSocket connected for session {session_id}")
 
-    # 🔥 CEK APAKAH INI LOCAL SESSION (TAMBAHAN BARU)
-    if session_id in ssh_manager.local_sessions:
-        await ssh_manager.handle_local_shell(session_id, websocket)
-        return
-
-    # 🔥 EXISTING CODE - TIDAK DIUBAH
-    if session_id not in ssh_manager.connections:
-        await websocket.send_json({
-            "type": "error",
-            "data": "Session not found"
-        })
-        await websocket.close()
-        return
-
-    conn = ssh_manager.connections[session_id]
-
     try:
-        process = await conn.create_process(
-            term_type="xterm",
-            term_size=(80, 24)
-        )
+        # 🔥 CEK APAKAH INI LOCAL SESSION (TAMBAHAN BARU)
+        if session_id in ssh_manager.local_sessions:
+            await ssh_manager.handle_local_shell(session_id, websocket)
+            return
 
-        logger.info("PTY process started")
+        # 🔥 EXISTING CODE - TIDAK DIUBAH
+        if session_id not in ssh_manager.connections:
+            await websocket.send_json({
+                "type": "error",
+                "data": "Session not found"
+            })
+            await websocket.close()
+            return
 
-        async def read_from_shell():
+        conn = ssh_manager.connections[session_id]
+
+        try:
+            process = await conn.create_process(
+                term_type="xterm",
+                term_size=(80, 24)
+            )
+
+            logger.info("PTY process started")
+
+            async def read_from_shell():
+                try:
+                    while True:
+                        data = await process.stdout.read(1024)
+                        if not data:
+                            break
+                        await websocket.send_json({
+                            "type": "data",
+                            "data": data
+                        })
+                except Exception as e:
+                    logger.error(f"Read error: {e}")
+
+            async def write_to_shell():
+                try:
+                    async for message in websocket.iter_json():
+                        if message["type"] == "input":
+                            process.stdin.write(message["data"])
+                            await process.stdin.drain()
+
+                        elif message["type"] == "resize":
+                            cols = int(message.get("cols", 80))
+                            rows = int(message.get("rows", 24))
+                            process.change_terminal_size(cols, rows)
+
+                except Exception as e:
+                    logger.error(f"Write error: {e}")
+
+            await asyncio.gather(
+                read_from_shell(),
+                write_to_shell()
+            )
+
+        except Exception as e:
+            logger.error(f"Terminal error: {e}")
+            await websocket.send_json({
+                "type": "error",
+                "data": str(e)
+            })
+
+        finally:
             try:
-                while True:
-                    data = await process.stdout.read(1024)
-                    if not data:
-                        break
-                    await websocket.send_json({
-                        "type": "data",
-                        "data": data
-                    })
-            except Exception as e:
-                logger.error(f"Read error: {e}")
-
-        async def write_to_shell():
-            try:
-                async for message in websocket.iter_json():
-                    if message["type"] == "input":
-                        process.stdin.write(message["data"])
-                        await process.stdin.drain()
-
-                    elif message["type"] == "resize":
-                        cols = int(message.get("cols", 80))
-                        rows = int(message.get("rows", 24))
-                        process.change_terminal_size(cols, rows)
-
-            except Exception as e:
-                logger.error(f"Write error: {e}")
-
-        await asyncio.gather(
-            read_from_shell(),
-            write_to_shell()
-        )
-
-    except Exception as e:
-        logger.error(f"Terminal error: {e}")
-        await websocket.send_json({
-            "type": "error",
-            "data": str(e)
-        })
+                process.close()
+                await process.wait_closed()
+            except:
+                pass
 
     finally:
-        try:
-            process.close()
-            await process.wait_closed()
-        except:
-            pass
-
+        # 🔥 HAPUS DARI ACTIVE CONNECTIONS SAAT KONEKSI DITUTUP
+        if hasattr(terminal_websocket, "active_connections") and session_id in terminal_websocket.active_connections:
+            terminal_websocket.active_connections.remove(session_id)
         logger.info(f"Session {session_id} closed")

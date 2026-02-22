@@ -71,6 +71,16 @@ function App() {
     }
   }, [isAuthenticated, userId]);
 
+  useEffect(() => {
+    if (sessions.length > 0 && !activeSession) {
+      // Jika ada sessions tapi tidak ada active session, pilih yang pertama
+      setActiveSession(sessions[0].id);
+    } else if (sessions.length === 0 && activeSession) {
+      // Jika tidak ada sessions tapi masih ada active session, set ke null
+      setActiveSession(null);
+    }
+  }, [sessions, activeSession]);
+
   const handleLogin = (username, password) => {
     // Login akan di-handle oleh Login component
     // Setelah login sukses, Login component akan panggil onLogin dengan user_id
@@ -117,7 +127,7 @@ function App() {
       `${connection.username}@${connection.host}:${connection.port}`;
 
     const newSession = {
-      id: Date.now().toString(),
+      id: `${Date.now()}-${Math.random()}`,
       name: sessionName,
       host: connection.host,
       port: connection.port,
@@ -246,17 +256,31 @@ function App() {
     setTimeout(() => handleConnect(sessionId, true), 1000); // ← true = isReconnect
   };
 
-  const handleCloseTab = (sessionId) => {
+  const handleCloseTab = async (sessionId) => {
     const session = sessions.find((s) => s.id === sessionId);
-    if (session.connected) {
-      handleDisconnect(sessionId);
+
+    // 🔥 JIKA CONNECTED, DISCONNECT DULU DAN TUNGGU SELESAI
+    if (session?.connected) {
+      try {
+        await handleDisconnect(sessionId); // ← TUNGGU SAMPAI SELESAI
+      } catch (error) {
+        console.error("Disconnect error:", error);
+      }
     }
 
+    // 🔥 BARU FILTER SESSIONS
     const newSessions = sessions.filter((s) => s.id !== sessionId);
+
+    // 🔥 UPDATE STATE
     setSessions(newSessions);
 
+    // 🔥 UPDATE ACTIVE SESSION
     if (activeSession === sessionId) {
-      setActiveSession(newSessions.length > 0 ? newSessions[0].id : null);
+      if (newSessions.length > 0) {
+        setActiveSession(newSessions[0].id);
+      } else {
+        setActiveSession(null);
+      }
     }
   };
 

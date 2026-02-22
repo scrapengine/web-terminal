@@ -82,7 +82,7 @@ const TabBar = ({
       }}
     >
       <Tabs
-        value={activeSession}
+        value={activeSession || false}
         onChange={handleChange}
         variant="scrollable"
         scrollButtons="auto"
