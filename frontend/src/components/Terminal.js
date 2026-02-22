@@ -7,7 +7,7 @@ import "xterm/css/xterm.css";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import LinkOffIcon from "@mui/icons-material/LinkOff";
 
-const Terminal = ({ session, onQuickCommand }) => {
+const Terminal = ({ session }) => {
   const terminalRef = useRef(null);
   const terminalInstance = useRef(null);
   const fitAddon = useRef(null);
@@ -16,66 +16,99 @@ const Terminal = ({ session, onQuickCommand }) => {
   const [status, setStatus] = useState("disconnected");
 
   useEffect(() => {
-    if (!session.connected || !session.backendId) {
-      return;
-    }
+    if (!session.connected || !session.backendId) return;
 
-    // Initialize terminal
+    // =========================
+    // INIT TERMINAL
+    // =========================
     const term = new XTerm({
       cursorBlink: true,
       cursorStyle: "block",
       fontSize: 14,
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+      scrollback: 2000,
       theme: {
         background: "#1e1e1e",
         foreground: "#f0f0f0",
         cursor: "#f0f0f0",
+        selectionBackground: "#264f78",
       },
-      rows: 30,
-      cols: 80,
-      scrollback: 1000,
-      convertEol: true,
-      disableStdin: false,
-      windowsMode: true,
     });
 
-    // Add addons
     fitAddon.current = new FitAddon();
     term.loadAddon(fitAddon.current);
     term.loadAddon(new WebLinksAddon());
 
-    // Open terminal
-    term.open(terminalRef.current, true);
-    // Setelah term.open
-    setTimeout(() => {
-      term.focus();
-      term.scrollToBottom();
-      term.refresh(0, term.rows - 1);
-    }, 200);
-    fitAddon.current.fit();
+    // Buka terminal
+    term.open(terminalRef.current);
+    terminalInstance.current = term;
 
-    // Focus terminal
+    // 🔥 TUNGGU RENDERER SIAP
     setTimeout(() => {
-      term.focus();
-    }, 100);
+      try {
+        fitAddon.current?.fit();
+        term.focus();
+      } catch (e) {
+        setTimeout(() => {
+          try {
+            fitAddon.current?.fit();
+            term.focus();
+          } catch (e2) {
+            console.log("Final fit error:", e2);
+          }
+        }, 200);
+      }
+    }, 300);
 
-    // WebSocket connection
+    // =========================
+    // COPY SUPPORT (PC + HP)
+    // =========================
+    term.attachCustomKeyEventHandler((event) => {
+      // Ctrl + C → Copy
+      if (event.ctrlKey && event.key === "c") {
+        const selection = term.getSelection();
+        if (selection) {
+          navigator.clipboard.writeText(selection);
+          return false;
+        }
+      }
+
+      // Ctrl + V → Paste
+      if (event.ctrlKey && event.key === "v") {
+        navigator.clipboard.readText().then((text) => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(
+              JSON.stringify({
+                type: "input",
+                data: text,
+              }),
+            );
+          }
+        });
+        return false;
+      }
+
+      return true;
+    });
+
+    // =========================
+    // WEBSOCKET
+    // =========================
     setStatus("connecting");
+
     const ws = new WebSocket(
       `ws://localhost:8000/ws/terminal/${session.backendId}`,
     );
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log("WebSocket connected");
       setConnected(true);
       setStatus("connected");
 
-      // Kirim ukuran terminal
       setTimeout(() => {
         if (fitAddon.current && ws.readyState === WebSocket.OPEN) {
           const dimensions = fitAddon.current.proposeDimensions();
-          if (dimensions && dimensions.cols && dimensions.rows) {
+          if (dimensions?.cols && dimensions?.rows) {
             ws.send(
               JSON.stringify({
                 type: "resize",
@@ -85,70 +118,38 @@ const Terminal = ({ session, onQuickCommand }) => {
             );
           }
         }
-      }, 500);
+      }, 300);
     };
 
-    // ws.onmessage = (event) => {
-    //   try {
-    //     const data = JSON.parse(event.data);
-    //     console.log("📥 FROM SERVER:", data);
-
-    //     if (data.type === "data") {
-    //       console.log("📝 ECHO:", JSON.stringify(data.data));
-
-    //       // PASTIKAN INI JALAN!
-    //       if (terminalInstance.current) {
-    //         terminalInstance.current.write(data.data);
-    //         terminalInstance.current.refresh(
-    //           0,
-    //           terminalInstance.current.rows - 1,
-    //         ); // Paksa refresh
-    //         console.log("✅ Data written to terminal");
-    //       } else {
-    //         console.error("❌ terminalInstance.current is NULL!");
-    //       }
-    //     }
-    //   } catch (e) {
-    //     console.error("Error parsing message:", e);
-    //   }
-    // };
-
-    ws.onclose = (event) => {
-      console.log("WebSocket closed:", event.code, event.reason);
+    ws.onclose = () => {
       setConnected(false);
       setStatus("disconnected");
-      term.writeln("\x1b[31m\r\nDisconnected from server\x1b[0m\r\n");
+      term.writeln("\r\n\x1b[31mDisconnected from server\x1b[0m\r\n");
     };
 
-    // ✅ BENAR: Handler untuk input real-time
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "data" && terminalInstance.current) {
+          terminalInstance.current.write(data.data);
+        }
+      } catch (e) {
+        console.error("WS parse error:", e);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error("WebSocket error:", error);
+      setStatus("error");
+      terminalInstance.current?.writeln(
+        "\r\n\x1b[31mConnection error\x1b[0m\r\n",
+      );
+    };
+
+    // =========================
+    // INPUT → SEND TO SERVER
+    // =========================
     term.onData((data) => {
-      const charCode = data.charCodeAt(0);
-
-      // Handle backspace
-      if (charCode === 8 || charCode === 127) {
-        // Kirim ke server
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(
-            JSON.stringify({
-              type: "input",
-              data: "\x7f",
-            }),
-          );
-        }
-
-        // Hapus satu karakter dari layar (lokal echo)
-        if (terminalInstance.current) {
-          terminalInstance.current.write("\b \b");
-        }
-        return;
-      }
-
-      // Untuk karakter biasa: LOKAL ECHO dulu!
-      if (terminalInstance.current) {
-        terminalInstance.current.write(data); // Tampilkan langsung
-      }
-
-      // Kirim ke server
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
           JSON.stringify({
@@ -159,43 +160,48 @@ const Terminal = ({ session, onQuickCommand }) => {
       }
     });
 
-    // Tetap terima echo dari server untuk update
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
+    // =========================
+    // 🔥 EXPOSE FUNCTION UNTUK QUICK COMMANDS
+    // =========================
+    window.sendCommandToTerminal = (command) => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        // console.log("Sending quick command:", command);
 
-        if (data.type === "data") {
-          if (terminalInstance.current) {
-            // Tulis data
-            terminalInstance.current.write(data.data);
+        // Kirim perintah ke server
+        wsRef.current.send(
+          JSON.stringify({
+            type: "input",
+            data: command,
+          }),
+        );
 
-            // CEK: Ini adalah prompt (mengandung $ atau #)
-            if (data.data.includes("$") || data.data.includes("#")) {
-              // Prompt terdeteksi, paksa baris baru dengan menulis carriage return
-              setTimeout(() => {
-                // Ini akan memastikan kursor di baris yang benar
-                terminalInstance.current.write("");
-              }, 5);
+        // Jika command tidak diakhiri newline, tambahkan enter
+        if (!command.endsWith("\n") && !command.endsWith("\r")) {
+          setTimeout(() => {
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(
+                JSON.stringify({
+                  type: "input",
+                  data: "\n",
+                }),
+              );
             }
-          }
+          }, 50);
         }
-      } catch (e) {
-        console.error("Error:", e);
+      } else {
+        console.warn("⚠️ Terminal not connected");
       }
     };
 
-    // ✅ BENAR: Untuk paste, kita bisa handle via onData juga
-    // atau menggunakan custom handler
-
-    // Handle resize
+    // =========================
+    // RESIZE HANDLER
+    // =========================
     const handleResize = () => {
-      if (
-        fitAddon.current &&
-        wsRef.current &&
-        wsRef.current.readyState === WebSocket.OPEN
-      ) {
+      fitAddon.current?.fit();
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
         const dimensions = fitAddon.current.proposeDimensions();
-        if (dimensions && dimensions.cols && dimensions.rows) {
+        if (dimensions?.cols && dimensions?.rows) {
           wsRef.current.send(
             JSON.stringify({
               type: "resize",
@@ -206,19 +212,23 @@ const Terminal = ({ session, onQuickCommand }) => {
         }
       }
     };
+
     window.addEventListener("resize", handleResize);
 
-    terminalInstance.current = term;
-
-    // Cleanup
+    // =========================
+    // CLEANUP
+    // =========================
     return () => {
       window.removeEventListener("resize", handleResize);
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+
+      // Bersihkan function quick command
+      window.sendCommandToTerminal = null;
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.close();
       }
-      if (terminalInstance.current) {
-        terminalInstance.current.dispose();
-      }
+
+      term.dispose();
     };
   }, [session.connected, session.backendId]);
 
@@ -261,7 +271,9 @@ const Terminal = ({ session, onQuickCommand }) => {
             variant="outlined"
           />
           <Typography variant="body2" color="text.secondary">
-            {session.host}:{session.port} as {session.username}
+            {session.isLocal
+              ? `Local Terminal (${session.username})`
+              : `${session.host}:${session.port} as ${session.username}`}
           </Typography>
         </Box>
 
@@ -277,6 +289,7 @@ const Terminal = ({ session, onQuickCommand }) => {
               </IconButton>
             </span>
           </Tooltip>
+
           <Tooltip title="Disconnect">
             <span>
               <IconButton
@@ -301,8 +314,6 @@ const Terminal = ({ session, onQuickCommand }) => {
           "& .xterm": {
             height: "100%",
           },
-          minHeight: "200px", // Tambahkan ini
-          border: "1px solid red", // Tambahkan ini untuk debug
         }}
         onClick={() => terminalInstance.current?.focus()}
       />
